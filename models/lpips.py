@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 import numpy as np
 import torchvision
+from collections import namedtuple
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-class vgg16(nn.module):
+class vgg16(nn.Module):
     def __init__(self, pretrained=True, requires_grad=False) :
         super(vgg16, self).__init__()
 
@@ -40,27 +41,27 @@ class vgg16(nn.module):
         # output of vgg features
         h = self.slice1(x)
         h_relu1_2 = h
-        h = self.slice1(x)
+        h = self.slice2(h)
         h_relu2_2 = h
-        h = self.slice1(x)
+        h = self.slice3(h)
         h_relu3_3 = h
-        h = self.slice1(x)
+        h = self.slice4(h)
         h_relu4_3 = h
-        h = self.slice1(x)
+        h = self.slice5(h)
         h_relu5_3 = h
         vgg_outputs = namedtuple("VggOutputs", ['relu1_2', 'relu2_2', 'relu3_3', 'relu4_3', 'relu5_3'])
         out = vgg_outputs(h_relu1_2, h_relu2_2, h_relu3_3, h_relu4_3, h_relu5_3)
         return out
 
-class LPIPS(nn.module):
+class LPIPS(nn.Module):
     def __init__(self, net='vgg', version='0.1', use_dropout=True):
-        super(LPIPS, self),__init__
+        super(LPIPS, self).__init__()
         self.version=version
         self.net = vgg16(pretrained=True, requires_grad=False)
         self.scaling_layer = ScalingLayer()
         self.channels = [64,128,256,512,512]
         self.length = len(self.channels)
-
+        self.L = len(self.channels)
         # Add 1x1 convolutional Layers
         self.lin0 = NetLinLayer(self.channels[0], use_dropout=use_dropout)
         self.lin1 = NetLinLayer(self.channels[1], use_dropout=use_dropout)
@@ -86,7 +87,7 @@ class LPIPS(nn.module):
             param.requires_grad = False
         ########################
 
-    def forward(self, x0,xi):
+    def forward(self, x0,x1, normalize=False):
         # Scale the inputs to -1 to +1 range if needed
         if normalize:  # turn on this flag if input is [0,1] so it can be adjusted to [-1, +1]
             x0 = 2 * x0 - 1
@@ -96,21 +97,20 @@ class LPIPS(nn.module):
         x0_input, x1_input = self.scaling_layer(x0), self.scaling_layer(x1)
 
         # vgg outputs
-        y0, y1 = self.net.forward(in0_input), self.net.forward(in1_input)
+        y0, y1 = self.net.forward(x0_input), self.net.forward(x1_input)
         feature0, feature1, diff = {},{},{}
 
         for k in range(self.length):
-            feature0[k], feature1[k] =  nn.functional.normalize(yo[k], dim=1), nn.functional.normalize(y1[k])
-            diff[k] = (yo[k] - y1[k]) ** 2
+            feature0[k], feature1[k] =  nn.functional.normalize(y0[k], dim=1), nn.functional.normalize(y1[k])
+            diff[k] = (y0[k] - y1[k]) ** 2
 
 
-        res = [ spatial_average(self.lins[k](diff[k]))  for k in range(self.L) ]
-        val = sum(res)
-        return val
+        res = [ spatial_average(self.lins[k](diff[k]), keepdim=True)  for k in range(self.L) ]
+        return sum(res)
 
 class ScalingLayer(nn.Module):
     def __init__(self):
-        super(ScalingLayer, self).__init__
+        super(ScalingLayer, self).__init__()
 
         # use register buffer to make sure they would not be updated during bp, and use None to fit any shape of the input x.
         self.register_buffer('shift', torch.Tensor([-.030, -.088, -.188])[None, :, None, None])

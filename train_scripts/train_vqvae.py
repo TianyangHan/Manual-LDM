@@ -3,9 +3,17 @@ import argparse
 import numpy as np
 from torch.utils.data.dataloader import DataLoader
 from models.vqvae import VQVAE
-from model.discriminator import Discriminator
-from model.lpips import LPIPS
+from models.discriminator import Discriminator
+from models.lpips import LPIPS
 from tqdm import tqdm
+import random
+from torch.optim import Adam
+import yaml
+# from dataset.mnist_dataset import MnistDataset
+from dataset.celeb_dataset import CelebDataset
+from torchvision.utils import make_grid
+import os
+import torchvision
 
 
 def train(args):
@@ -18,10 +26,10 @@ def train(args):
             print(exc)
     print(config)
 
-    device = torch.device('cuda' if torch.cuda.is_avaiable() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    data_config = config['dataset_params']
-    auto_encoder_config = config['auto_encoder_params']
+    dataset_config = config['dataset_params']
+    autoencoder_config = config['autoencoder_params']
     train_config = config['train_params']
 
     # Set the desired seed value #
@@ -34,21 +42,16 @@ def train(args):
     #############################
 
     dataset_cls = {
-        'mnist':MinistDataset,
+        # 'mnist':MinistDataset,
         'celebhq':CelebDataset
-    }.get(data_config['name'])
-    dataset = dataset_cls()
-    data_loader = DataLoader(
-        dataset, batch_size=train_config['autoencoder_batch_size'],
-        shuffle=True,
-    )
-
-    im_dataset = im_dataset_cls(split='train',
-                                im_path=dataset_config['im_path'],
-                                im_size=dataset_config['im_size'],
+    }.get(dataset_config['name'])
+    dataset = dataset_cls(split='train',
+                                image_path=dataset_config['im_path'],
+                                image_size=dataset_config['im_size'],
                                 im_channels=dataset_config['im_channels'])
+
     
-    data_loader = DataLoader(im_dataset,
+    data_loader = DataLoader(dataset,
                              batch_size=train_config['autoencoder_batch_size'],
                              shuffle=True)
 
@@ -61,12 +64,12 @@ def train(args):
     num_epochs = train_config['autoencoder_epochs']
 
 
-    model = VQVAE(in_channels=data_config['in_channels'], model_config = autoencoder_config).to(device)
+    model = VQVAE(in_channels=dataset_config['im_channels'], model_config = autoencoder_config).to(device)
     discriminator = Discriminator(im_channels=dataset_config['im_channels']).to(device)
     lpips_model = LPIPS().eval().to(device)
 
 
-    recon_loss = troch.nn.MSELoss()
+    recon_loss = torch.nn.MSELoss()
     disc_loss = torch.nn.MSELoss()
 
     optimizer_d = Adam(discriminator.parameters(), lr=train_config['autoencoder_lr'], betas=(0.5, 0.999))
@@ -81,9 +84,9 @@ def train(args):
     img_save_count = 0
 
 
-    for epoch_idc in range(num_epochs):
+    for epoch_idx in range(num_epochs):
         reconstruction_losses = []
-        code_boook_losses = []
+        codebook_losses = []
         perceptual_losseses = []
         discriminator_losses = []
         generator_losses = []
@@ -92,14 +95,14 @@ def train(args):
         optimizer_g.zero_grad()
         optimizer_d.zero_grad()
         
-        for index, data in tqdm(enumerate(data_loader)):
+        for  data in tqdm(data_loader):
             step += 1
             data = data.float().to(device)
 
             model_output = model(data)
-            output, z, quantize_loss = model_output
+            output, z, quantize_losses = model_output
 
-            # Image Saving Logic
+            # # Image Saving Logic
             if step % image_save_steps == 0 or step == 1:
                 sample_size = min(8, data.shape[0])
                 save_output = torch.clamp(output[:sample_size], -1., 1.).detach().cpu()
@@ -162,7 +165,7 @@ def train(args):
                 if step % accumulate_steps == 0:
                     optimizer_d.step()
                     optimizer_d.zero_grad()
-            if step % acc_steps == 0:
+            if step % accumulate_steps == 0:
                 optimizer_g.step()
                 optimizer_g.zero_grad()
 
@@ -170,20 +173,20 @@ def train(args):
         optimizer_d.zero_grad()
         optimizer_g.step()
         optimizer_g.zero_grad()
-        if len(disc_losses) > 0:
+        if len(discriminator_losses) > 0:
             print(
                 'Finished epoch: {} | Recon Loss : {:.4f} | Perceptual Loss : {:.4f} | '
                 'Codebook : {:.4f} | G Loss : {:.4f} | D Loss {:.4f}'.
                 format(epoch_idx + 1,
-                       np.mean(recon_losses),
+                       np.mean(reconstruction_losses),
                        np.mean(perceptual_losses),
                        np.mean(codebook_losses),
-                       np.mean(gen_losses),
-                       np.mean(disc_losses)))
+                       np.mean(generator_losses),
+                       np.mean(discriminator_losses)))
         else:
             print('Finished epoch: {} | Recon Loss : {:.4f} | Perceptual Loss : {:.4f} | Codebook : {:.4f}'.
                   format(epoch_idx + 1,
-                         np.mean(recon_losses),
+                         np.mean(reconstruction_losses),
                          np.mean(perceptual_losses),
                          np.mean(codebook_losses)))
         

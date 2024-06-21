@@ -11,7 +11,7 @@ class Discriminator(nn.Module):
     to the grid cell is real
     """
 
-    def __init__(self, in_channels=3,
+    def __init__(self, im_channels=3,
                  conv_channels=[64, 128, 256],
                  kernels=[4,4,4,4],
                  strides=[2,2,2,1],
@@ -26,9 +26,9 @@ class Discriminator(nn.Module):
                     nn.Conv2d(layers_dim[i], layers_dim[i+1], kernel_size=kernels[i],
                     stride = strides[i], padding= paddings[i], bias=False if i!=0 else True),
                 
-                nn.BatchNorm2d(layers[i+1]) if i!=len(layers_dim)-2 and i!=0 else nn.Identity(),
-                activation if i!=len(layers_dim)-2 else nn.Identity
-                ) for i in rangelen(layers_dim )-1
+                nn.BatchNorm2d(layers_dim[i+1]) if i!=len(layers_dim)-2 and i!=0 else nn.Identity(),
+                activation if i!=len(layers_dim)-2 else nn.Identity()
+                ) for i in range(len(layers_dim )-1)
             ]
         )
 

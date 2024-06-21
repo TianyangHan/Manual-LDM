@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-from blocks import DownBlock, MidBlock, UpBlock
+from models.blocks import DownBlock, MidBlock, UpBlock
 
 
 
-class VAE(nn.module):
+class VAE(nn.Module):
     def __init__(self, in_channels, model_config):
         super().__init__()
         self.down_channels = model_config['down_channels']  # how much for number of downblocks (each downblocks represent change of dimension/channels)

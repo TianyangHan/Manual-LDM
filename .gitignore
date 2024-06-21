@@ -1,0 +1,4 @@
+data/
+models/weights/
+__pycache__/
+celebhq/
