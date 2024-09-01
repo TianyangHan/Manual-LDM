@@ -1,6 +1,25 @@
 import torch
 import torch.nn as nn
 
+def get_time_embedding(time_steps, t_emb_dim):
+    r"""
+    Convert time steps tensor into an embedding using the
+    sinusoidal time embedding formula
+    :param time_steps: 1D tensor of length batch size
+    :param temb_dim: Dimension of the embedding
+    :return: BxD embedding representation of B time steps
+    """
+    assert temb_dim % 2 == 0, "time embedding dimension must be divisible by 2"
+    
+    # factor = 10000^(2i/d_model)
+    factor = 10000 ** ((torch.arange(
+        start=0, end=temb_dim // 2, dtype=torch.float32, device=time_steps.device) / (temb_dim // 2))
+    )
+    # pos / factor
+    # timesteps B -> B, 1 -> B, temb_dim
+    t_emb = time_steps[:, None].repeat(1, temb_dim // 2) / factor
+    t_emb = torch.cat([torch.sin(t_emb), torch.cos(t_emb)], dim=-1)
+    return t_emb
 
 
 class DownBlock(nn.Module):
@@ -374,6 +393,157 @@ class UpBlock(nn.Module):
 
                 context_proj = self.text_emd_layers[i](context)
                 out_attn = self.cross_attentions[i](in_attn,in_attn,in_attn)
+                out_attn = out_attn.transpose(1,2).reshape(bs, channels, h, w)
+                out = out+out_attn
+
+        # out = self.down_sample_conv(out)
+        return out
+
+
+
+class UpBlockUnet(nn.Module):
+    r"""
+    Down conv block with attention.
+    Sequence of following block
+    1. Upsample
+    1. Concatenate Down block output
+    2. Resnet block with time embedding
+    3. Attention Block
+    """
+
+    def __init__(self, in_channels, out_channels, t_emb_dim, up_sample,num_layers,
+                norm_channels, num_heads,  context_dim=None, cross_attn=False):
+        super().__init__()
+        self.num_layers = num_layers
+        self.up_sample = up_sample
+        self.cross_attn = cross_attn
+        self.t_emb_dim = t_emb_dim
+        self.context_dim = context_dim
+
+        self.resnet_conv_first = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.GroupNorm(norm_channels, in_channels if i==0 else out_channels),
+                    nn.SiLU(),
+                    nn.Conv2d(in_channels if i==0 else out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+                )
+                for i in range(num_layers)
+                ]
+        )
+
+
+
+        self.resnet_conv_second = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.GroupNorm(norm_channels,  out_channels),
+                    nn.SiLU(),
+                    nn.Conv2d( out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+                )
+                for i in range(num_layers)
+                ]
+        )
+
+        self.residual_input_conv = nn.ModuleList(
+            [
+                nn.Conv2d(in_channels if i==0 else out_channels, out_channels, kernel_size=1)
+                for i in range(num_layers)
+            ]
+        )
+
+        if self.t_emb_dim is not None:
+            self.t_emb_layers = nn.ModuleList(
+                [
+                    nn.Sequential(
+                        nn.SiLU(),
+                        nn.Linear(self.t_emb_dim, out_channels)
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
+        
+        self.up_sample_conv = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, 4,2,1) if self.up_sample else nn.Identity()
+        
+
+        self.attention_norms = nn.ModuleList(
+            [
+                nn.GroupNorm(norm_channels, out_channels)
+                for _ in range(num_layers)]
+        )
+
+        self.attentions = nn.ModuleList(
+            [
+                nn.MultiheadAttention(out_channels, num_heads, batch_first=True)
+            for _ in range(num_layers)]
+        )
+
+        if self.t_emb_dim is not None:
+            self.text_emd_layers = nn.ModuleList(
+                [
+                    nn.Sequential(nn.SiLU(),
+                    nn.Linear(t_emb_dim, out_channels)  ) for _ in range(num_layers)
+                    
+                ]
+            )
+
+
+        if self.cross_attn:
+            assert context_dim is not None, "Context Dimension must be passed for cross attention"
+            self.cross_attentions = nn.ModuleList(
+                [nn.MultiheadAttention(out_channels, num_heads, batch_first=True)]
+                for _ in range(num_layers)
+            )
+
+            self.cross_attention_norms = nn.ModuleList(
+                [nn.GroupNorm[norm_channels, out_channels]]
+                for _ in range(num_layers)
+            )
+
+            self.contetx_projection = nn.ModuleList(
+                [nn.Linear(context_dim, out_channels)] for _ in range(num_layers)
+            )
+
+
+
+    def forward(self,x, t_emb=None, out_down=None, context=None):
+        x = self.up_sample_conv(x)
+        if out_down is not None:
+            x = torch.cat([x,out_down], dim=1)
+        out = x
+        for i in range(self.num_layers):
+            # resnet
+            resnet_input = out
+            out = self.resnet_conv_first[i](out)
+
+            if self.t_emb_dim is not None:
+                out+=self.t_emb_layers[i](t_emb)[:,:,None,None]
+
+            out = self.resnet_conv_second[i](out)
+            out+=self.residual_input_conv[i](resnet_input)
+
+            # self attn
+            bs, channels, h, w = out.shape
+            in_attn = out.reshape(bs, channels, h*w)
+            in_attn = self.attention_norms[i](in_attn)
+            in_attn = in_attn.transpose(1,2)
+            out_attn, _ = self.attentions[i](in_attn, in_attn, in_attn)
+            out_attn = out_attn.transpose(1,2).reshape(bs, channels, h, w)
+            out += out_attn
+
+            if self.cross_attn:
+                assert context is not None, "context cannot be None if cross attention layers are used"
+                bs, channels, h, w = out.shape
+                in_attn = out.reshape(bs, channels, h*w)
+                in_attn = self.attention_norms[i](in_attn)
+                in_attn = in_attn.transpose(1,2)
+                assert len(context.shape) == 3, \
+                    "Context shape does not match B,_,CONTEXT_DIM"
+                assert context.shape[0] == x.shape[0] and context.shape[-1] == self.context_dim,\
+                    "Context shape does not match B,_,CONTEXT_DIM"
+
+
+                context_proj = self.context_proj[i](context)
+                out_attn = self.cross_attentions[i](in_attn,context_proj,context_proj)
                 out_attn = out_attn.transpose(1,2).reshape(bs, channels, h, w)
                 out = out+out_attn
 

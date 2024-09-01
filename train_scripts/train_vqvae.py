@@ -14,9 +14,16 @@ from dataset.celeb_dataset import CelebDataset
 from torchvision.utils import make_grid
 import os
 import torchvision
+import wandb
 
 
 def train(args):
+
+    wandb.init(project='vqvae', entity='hantianyang522',
+            config={
+                'dataset': 'celebhq'
+            }
+    )
 
     # Read the config file #
     with open(args.config_path, 'r') as file:
@@ -87,7 +94,7 @@ def train(args):
     for epoch_idx in range(num_epochs):
         reconstruction_losses = []
         codebook_losses = []
-        perceptual_losseses = []
+        perceptual_losses = []
         discriminator_losses = []
         generator_losses = []
         losses = []
@@ -136,12 +143,12 @@ def train(args):
                 discriminator_fake_pred = discriminator(output)
                 discriminator_fake_loss = disc_loss(discriminator_fake_pred, torch.ones(discriminator_fake_pred.shape,
                                                     device = discriminator_fake_pred.device))
-                generator_losses.append(train_config['disc_weight'] * disc_fake_loss.item())
-                generator_loss += train_config['disc_weight'] * disc_fake_loss / accumulate_steps
+                generator_losses.append(train_config['disc_weight'] * discriminator_fake_loss.item())
+                generator_loss += train_config['disc_weight'] * discriminator_fake_loss / accumulate_steps
 
             # lpips
             lpips_loss = torch.mean(lpips_model(output, data)) / accumulate_steps
-            perceptual_losseses.append(train_config['perceptual_weight'] * lpips_loss.item())
+            perceptual_losses.append(train_config['perceptual_weight'] * lpips_loss.item())
             generator_loss += train_config['perceptual_weight'] * lpips_loss / accumulate_steps
             losses.append(generator_loss.item())
             generator_loss.backward()
@@ -151,7 +158,7 @@ def train(args):
             if step > discriminator_step_start:
                 fake = output
                 discriminator_fake_pred = discriminator(fake.detach())
-                discriminator_real_loss = discriminator(data)
+                discriminator_real_pred = discriminator(data)
                 discriminator_fake_loss = disc_loss(discriminator_fake_pred, torch.zeros(discriminator_fake_pred.shape,
                                                     device = discriminator_fake_pred.device))
                 discriminator_real_loss = disc_loss(discriminator_fake_pred, torch.ones(discriminator_real_pred.shape,
@@ -173,6 +180,9 @@ def train(args):
         optimizer_d.zero_grad()
         optimizer_g.step()
         optimizer_g.zero_grad()
+
+
+            
         if len(discriminator_losses) > 0:
             print(
                 'Finished epoch: {} | Recon Loss : {:.4f} | Perceptual Loss : {:.4f} | '
@@ -183,18 +193,32 @@ def train(args):
                        np.mean(codebook_losses),
                        np.mean(generator_losses),
                        np.mean(discriminator_losses)))
+            wandb.log({"epoch":epoch_idx+1,
+                      "reconstruction_losses":   np.mean(reconstruction_losses),
+                      "perceptual_losses":  np.mean(perceptual_losses),
+                      "codebook_losses":  np.mean(codebook_losses),
+                      "generator_losses":  np.mean(generator_losses),
+                      "discriminator_losses":  np.mean(discriminator_losses)})
+
+
         else:
             print('Finished epoch: {} | Recon Loss : {:.4f} | Perceptual Loss : {:.4f} | Codebook : {:.4f}'.
                   format(epoch_idx + 1,
                          np.mean(reconstruction_losses),
                          np.mean(perceptual_losses),
                          np.mean(codebook_losses)))
+            wandb.log({"epoch":epoch_idx+1,
+                      "reconstruction_losses":   np.mean(reconstruction_losses),
+                      "perceptual_losses":  np.mean(perceptual_losses),
+                      "codebook_losses":  np.mean(codebook_losses)})
+    
         
         torch.save(model.state_dict(), os.path.join(train_config['task_name'],
                                                     train_config['vqvae_autoencoder_ckpt_name']))
         torch.save(discriminator.state_dict(), os.path.join(train_config['task_name'],
                                                             train_config['vqvae_discriminator_ckpt_name']))
     print('Done Training...')
+    wandb.finish()
 
 
 
